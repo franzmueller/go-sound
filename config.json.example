@@ -1,0 +1,12 @@
+{
+    "device_name": "<audio device name>",
+    "device_type": "urn:infai:ses:device-type:4d74edcb-cc0b-48db-8f5b-2aaf97214345",
+    "mqtt": {
+        "broker": "<ip>",
+        "port": 1883,
+        "username": "",
+        "password": "",
+        "client_id": "go-sound"
+    },
+    "sound_timeout": "5m"
+}
