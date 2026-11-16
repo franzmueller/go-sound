@@ -24,5 +24,5 @@ require (
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/moutend/go-wca v0.3.0
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
-	golang.org/x/sys v0.36.0 // indirect
+	golang.org/x/sys v0.36.0
 )

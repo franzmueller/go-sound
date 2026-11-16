@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -33,10 +34,9 @@ var (
 	lastSoundTime time.Time
 	peakValue     float32
 	statusItem    *systray.MenuItem
-	mqttClient    mqtt.Client
 	cfg           *Config
 	localId       string
-	active        bool
+	active        atomic.Bool
 )
 
 //go:embed red.ico
@@ -72,6 +72,7 @@ func main() {
 	}()
 
 	go setupMqtt()
+	startPowerWatcher()
 
 	// Start systray
 	systray.Run(onReady, onExit)
@@ -89,28 +90,26 @@ func setupMqtt() {
 	opts.SetKeepAlive(15 * time.Second)
 	opts.SetCleanSession(true)
 
-	// Set last will testament
-	opts.SetWill("event/"+localId+"/playing", "false", 1, true)
+	// Set last will testament on the lw topic of the device-manager, so that a lost connection
+	// (standby, crash, network) marks the device offline, as onExit does on a clean exit. MQTT allows
+	// one will only: a playing state left over from before the loss is corrected by the OnConnect
+	// handler, which publishes the current value on every (re)connect.
+	opts.SetWill("device-manager/device/"+cfg.MQTT.ClientID+"/lw", "offline", 1, false)
 
 	// Set connection handler for birth message
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
-		token := client.Publish("device-manager/device/"+cfg.MQTT.ClientID, 1, true, `{
-  "method":"set",
-  "device_id":"`+localId+`",
-  "data": {
-    "name":"`+cfg.DeviceName+`",
-    "state":"online",
-    "device_type":"`+cfg.DeviceType+`"
-  }
-}`)
-		token.Wait()
+		deadline := time.Now().Add(5 * time.Second)
+		publishBirth(client, deadline)
+		// Republish the current value so a reconnect cannot leave a stale one.
+		publishPlaying(client, active.Load(), deadline)
 	})
 
-	mqttClient = mqtt.NewClient(opts)
+	client := mqtt.NewClient(opts)
+	setClient(client)
 	var token mqtt.Token
 
 	for token == nil || token.Error() != nil {
-		token = mqttClient.Connect()
+		token = client.Connect()
 		token.Wait()
 		if token.Error() != nil {
 			log.Fatalf("Failed to connect to MQTT broker: %v", token.Error())
@@ -138,7 +137,7 @@ func onReady() {
 	go func() {
 		for {
 			<-mToggle.ClickedCh
-			if active {
+			if active.Load() {
 				onSoundStop()
 			} else {
 				onSoundStart()
@@ -165,9 +164,9 @@ func updateStatus() {
 	statusItem.SetTitle(statusText)
 
 	// Set icon
-	if mqttClient == nil || mqttClient.IsConnected() == false {
+	if c := getClient(); c == nil || c.IsConnected() == false {
 		systray.SetIcon(iconRed)
-	} else if active {
+	} else if active.Load() {
 		systray.SetIcon(iconGreen)
 	} else {
 		systray.SetIcon(iconGrey)
@@ -175,8 +174,9 @@ func updateStatus() {
 }
 
 func onExit() {
-	mqttClient.Publish("device-manager/device/"+cfg.MQTT.ClientID+"/lw", 1, false, "offline").Wait()
-	mqttClient.Disconnect(250)
+	client := getClient()
+	client.Publish("device-manager/device/"+cfg.MQTT.ClientID+"/lw", 1, false, "offline").Wait()
+	client.Disconnect(250)
 	log.Println("Exiting...")
 }
 
@@ -276,7 +276,7 @@ func monitorDevice(device *wca.IMMDevice) {
 				calledOn = true
 				calledOff = false
 			}
-		} else if time.Since(lastSoundTime) > soundTimeout && !calledOff {
+		} else if time.Since(lastSoundTime) > silenceTimeout(soundTimeout, pres.isLocked()) && !calledOff {
 			ok := onSoundStop()
 			if !ok {
 				continue
@@ -290,14 +290,21 @@ func monitorDevice(device *wca.IMMDevice) {
 // ---- ACTIONS ----
 
 func onSoundStart() bool {
-	if mqttClient == nil {
+	client := getClient()
+	if client == nil {
 		log.Println("MQTT client is not initialized")
 		return false
 	}
-	active = true
+	active.Store(true)
+	t, _ := enqueuePlaying(client, true, true)
+	if t == nil {
+		// Suspended: resume publishes the current value.
+		log.Println("Sound detected while suspended, publish deferred")
+		return true
+	}
 	go func() {
-		ok := mqttClient.Publish("event/"+localId+"/playing", 1, false, "true").Wait()
-		if !ok {
+		t.Wait()
+		if t.Error() != nil {
 			log.Println("Failed to publish MQTT message for sound detection")
 		} else {
 			log.Println("Published MQTT message for sound detection")
@@ -307,14 +314,20 @@ func onSoundStart() bool {
 }
 
 func onSoundStop() bool {
-	if mqttClient == nil {
+	client := getClient()
+	if client == nil {
 		log.Println("MQTT client is not initialized")
 		return false
 	}
-	active = false
+	active.Store(false)
+	t, _ := enqueuePlaying(client, false, true)
+	if t == nil {
+		log.Println("Silence detected while suspended, publish deferred")
+		return true
+	}
 	go func() {
-		ok := mqttClient.Publish("event/"+localId+"/playing", 1, false, "false").Wait()
-		if !ok {
+		t.Wait()
+		if t.Error() != nil {
 			log.Println("Failed to publish MQTT message for no sound")
 		} else {
 			log.Println("Published MQTT message for no sound")
