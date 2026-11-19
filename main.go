@@ -73,6 +73,7 @@ func main() {
 
 	go setupMqtt()
 	startPowerWatcher()
+	startWebcamWatcher()
 
 	// Start systray
 	systray.Run(onReady, onExit)
@@ -100,8 +101,9 @@ func setupMqtt() {
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		deadline := time.Now().Add(5 * time.Second)
 		publishBirth(client, deadline)
-		// Republish the current value so a reconnect cannot leave a stale one.
+		// Republish the current values so a reconnect cannot leave a stale one.
 		publishPlaying(client, active.Load(), deadline)
+		publishWebcam(client, deadline)
 	})
 
 	client := mqtt.NewClient(opts)

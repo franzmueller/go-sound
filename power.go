@@ -83,6 +83,20 @@ func enqueuePlaying(client mqtt.Client, value, fromSound bool) (mqtt.Token, bool
 	return client.Publish("event/"+localId+"/playing", 1, false, strconv.FormatBool(value)), value
 }
 
+// enqueueWebcam publishes the current webcam state. It is read under pubMu,
+// so the last message on the wire carries the last stored state even when the
+// watcher and a lock or resume publish at the same time. While locked or
+// suspended the value is false.
+func enqueueWebcam(client mqtt.Client) (mqtt.Token, bool) {
+	if client == nil {
+		return nil, false
+	}
+	pubMu.Lock()
+	defer pubMu.Unlock()
+	value := webcamActive.Load() && !pres.webcamMuted()
+	return client.Publish("event/"+localId+"/webcam", 1, false, strconv.FormatBool(value)), value
+}
+
 func logBirth(ok bool, state string) {
 	if ok {
 		log.Println("Published birth message, state:", state)
@@ -96,6 +110,14 @@ func logPlaying(ok bool, value bool) {
 		log.Println("Published playing:", value)
 	} else {
 		log.Println("Failed to publish playing:", value)
+	}
+}
+
+func logWebcam(ok bool, value bool) {
+	if ok {
+		log.Println("Published webcam:", value)
+	} else {
+		log.Println("Failed to publish webcam:", value)
 	}
 }
 
@@ -113,6 +135,13 @@ func publishPlaying(client mqtt.Client, value bool, deadline time.Time) bool {
 	return ok
 }
 
+func publishWebcam(client mqtt.Client, deadline time.Time) bool {
+	t, sent := enqueueWebcam(client)
+	ok := awaitToken(t, deadline)
+	logWebcam(ok, sent)
+	return ok
+}
+
 // ---- power / session transitions (called from the window thread) ----
 
 func onSystemSuspend() {
@@ -125,8 +154,10 @@ func onSystemSuspend() {
 	// Enqueue both back to back, then wait for both within one deadline.
 	tPlay, sent := enqueuePlaying(client, false, false) // switches the subwoofer off
 	tBirth, state := enqueueBirth(client)
+	tCam, cam := enqueueWebcam(client) // false while suspended
 	logPlaying(awaitToken(tPlay, deadline), sent)
 	logBirth(awaitToken(tBirth, deadline), state)
+	logWebcam(awaitToken(tCam, deadline), cam)
 }
 
 func onSystemResume() {
@@ -139,8 +170,10 @@ func onSystemResume() {
 	client := getClient()
 	tBirth, state := enqueueBirth(client)
 	tPlay, sent := enqueuePlaying(client, active.Load(), false)
+	tCam, cam := enqueueWebcam(client)
 	logBirth(awaitToken(tBirth, deadline), state)
 	logPlaying(awaitToken(tPlay, deadline), sent)
+	logWebcam(awaitToken(tCam, deadline), cam)
 }
 
 func onSessionLock() {
@@ -149,7 +182,13 @@ func onSessionLock() {
 		return
 	}
 	// playing is untouched; the monitor skips the silence timeout while locked.
-	publishBirth(getClient(), time.Now().Add(powerPublishTimeout))
+	// webcam goes false while locked.
+	deadline := time.Now().Add(powerPublishTimeout)
+	client := getClient()
+	tBirth, state := enqueueBirth(client)
+	tCam, cam := enqueueWebcam(client)
+	logBirth(awaitToken(tBirth, deadline), state)
+	logWebcam(awaitToken(tCam, deadline), cam)
 }
 
 func onSessionUnlock() {
@@ -157,11 +196,13 @@ func onSessionUnlock() {
 	if !pres.setLocked(false) {
 		return
 	}
-	// Same as resume: birth, then the current value (false if still suspended).
+	// Same as resume: birth, then the current values (false if still suspended).
 	deadline := time.Now().Add(powerPublishTimeout)
 	client := getClient()
 	tBirth, state := enqueueBirth(client)
 	tPlay, sent := enqueuePlaying(client, active.Load(), false)
+	tCam, cam := enqueueWebcam(client)
 	logBirth(awaitToken(tBirth, deadline), state)
 	logPlaying(awaitToken(tPlay, deadline), sent)
+	logWebcam(awaitToken(tCam, deadline), cam)
 }

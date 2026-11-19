@@ -43,6 +43,19 @@ func (p *presence) suppressed() bool {
 	return playingSuppressed(p.suspended)
 }
 
+// webcamSuppressed reports whether webcam must be reported as false. A locked
+// session suppresses it as well as a suspended system: nobody sits in a call
+// at the PC then, and Windows Hello may use the camera on the lock screen.
+func webcamSuppressed(locked, suspended bool) bool {
+	return locked || suspended
+}
+
+func (p *presence) webcamMuted() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return webcamSuppressed(p.locked, p.suspended)
+}
+
 func (p *presence) isLocked() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

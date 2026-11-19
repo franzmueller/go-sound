@@ -73,6 +73,24 @@ func TestPlayingSuppressed(t *testing.T) {
 	}
 }
 
+func TestWebcamSuppressed(t *testing.T) {
+	if webcamSuppressed(false, false) {
+		t.Fatal("unlocked and awake must report the webcam")
+	}
+	if !webcamSuppressed(true, false) || !webcamSuppressed(false, true) || !webcamSuppressed(true, true) {
+		t.Fatal("lock and suspend must both suppress the webcam")
+	}
+	var p presence
+	p.setLocked(true)
+	if !p.webcamMuted() {
+		t.Fatal("lock must mute the webcam")
+	}
+	p.setLocked(false)
+	if p.webcamMuted() {
+		t.Fatal("unlock must unmute the webcam")
+	}
+}
+
 func TestSilenceTimeout(t *testing.T) {
 	if got := silenceTimeout(30*time.Minute, false); got != 30*time.Minute {
 		t.Errorf("unlocked: got %v", got)
